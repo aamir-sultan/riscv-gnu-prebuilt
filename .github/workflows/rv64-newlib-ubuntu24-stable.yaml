@@ -1,0 +1,28 @@
+name: RV64 Newlib (rv64gc) · Ubuntu 24.04 · stable
+
+# Builds the riscv-gnu-toolchain release recorded by the submodule on Ubuntu 24.04.
+# Started monthly by bump-riscv-gnu-toolchain.yaml after it bumps the submodule.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  rv64-newlib-ubuntu24:
+    permissions:
+      contents: write    # publish the GitHub Release
+    uses: ./.github/workflows/_build-riscv-gnu-ubuntu24.yaml
+    with:
+      name: rv64-newlib
+      channel: stable
+      configure_flags: --with-arch=rv64gc_zicsr_zifencei --with-abi=lp64d
+      triple: riscv64-unknown-elf
+      smoke_march: rv64gc_zicsr_zifencei
+      smoke_mabi: lp64d
+      retention_days: 40

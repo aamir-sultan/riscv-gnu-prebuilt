@@ -1,0 +1,28 @@
+name: RISC-V Newlib (multilib) · Ubuntu 24.04 · rolling
+
+# Builds the current tip of riscv-gnu-toolchain master on Ubuntu 24.04, every ~10 days.
+
+on:
+  schedule:
+    - cron: "0 6 5,15,25 * *"    # 06:00 UTC on the 5th, 15th and 25th
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  rv64-multilib-ubuntu24:
+    permissions:
+      contents: write    # publish the GitHub Release
+    uses: ./.github/workflows/_build-riscv-gnu-ubuntu24.yaml
+    with:
+      name: rv64-multilib
+      channel: rolling
+      configure_flags: --enable-multilib
+      triple: riscv64-unknown-elf
+      multilib: true
+      retention_days: 20    # covers two rolling cycles

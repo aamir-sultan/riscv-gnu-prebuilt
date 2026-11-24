@@ -1,0 +1,92 @@
+name: Publish release asset (reusable)
+
+# Called by the _build-riscv-gnu-<os>.yaml and _build-cva6-<os>.yaml workflows. Takes the archive from a
+# build's workflow artifact and publishes it to a GitHub Release, creating the
+# release if it does not exist yet. Each configuration and OS uploads its own
+# asset names, so several builds can publish to one release independently.
+
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        description: Workflow artifact holding the archive
+        type: string
+        required: true
+      file:
+        description: Archive file name inside the artifact
+        type: string
+        required: true
+      asset:
+        description: Release asset base name, e.g. rv64-newlib-rocky9
+        type: string
+        required: true
+      tag:
+        description: Release tag
+        type: string
+        required: true
+      title:
+        type: string
+        required: true
+      notes:
+        description: Release notes, used only when the release is created
+        type: string
+        required: true
+      prerelease:
+        type: boolean
+        default: false
+      latest:
+        description: Mark as the repository's latest release
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      FILE: ${{ inputs.file }}
+      ASSET: ${{ inputs.asset }}
+      TAG: ${{ inputs.tag }}
+      TITLE: ${{ inputs.title }}
+      NOTES: ${{ inputs.notes }}
+      PRERELEASE: ${{ inputs.prerelease }}
+      LATEST: ${{ inputs.latest }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+
+      - name: Prepare release assets
+        working-directory: dist
+        run: |
+          # Version-free asset names give stable download URLs, e.g.
+          # releases/latest/download/rv64-newlib-rocky9.tar.gz
+          mv "$FILE" "$ASSET.tar.gz"
+          size="$(stat -c %s "$ASSET.tar.gz")"
+          echo "$ASSET.tar.gz: $((size / 1024 / 1024)) MiB"
+          if [ "$size" -ge $((2 * 1024 * 1024 * 1024)) ]; then
+            echo "::error::$ASSET.tar.gz is over GitHub's 2 GiB release asset limit"
+            exit 1
+          fi
+          tar -xzf "$ASSET.tar.gz" -O ./build-info.txt > "$ASSET-build-info.txt"
+          sha256sum "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
+          ls -l
+
+      - name: Create release if needed and upload assets
+        working-directory: dist
+        run: |
+          flags=()
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          if [ "$LATEST" = true ]; then flags+=(--latest); else flags+=(--latest=false); fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TITLE" \
+              --notes "$NOTES" "${flags[@]}" \
+              || gh release view "$TAG" >/dev/null    # created concurrently by another build
+          fi
+          gh release upload "$TAG" --clobber \
+            "$ASSET.tar.gz" "$ASSET.tar.gz.sha256" "$ASSET-build-info.txt"
+          echo "Published $ASSET to release $TAG"

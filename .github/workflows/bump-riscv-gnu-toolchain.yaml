@@ -1,0 +1,80 @@
+name: Bump riscv-gnu-toolchain (monthly stable release)
+
+# Every month (~30 days): move the riscv-gnu-toolchain submodule to the latest
+# upstream release (committing on the default branch if it changed), then start
+# every *-stable.yaml build so they build that release.
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"    # 03:00 UTC on the 1st of every month
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-riscv-gnu-toolchain
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write    # commit the submodule bump
+      actions: write     # start the stable builds
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM: https://github.com/riscv-collab/riscv-gnu-toolchain
+      BRANCH: ${{ github.event.repository.default_branch }}
+      STABLE_WORKFLOWS: >-
+        rv64-newlib-rocky9-stable.yaml
+        rv64-newlib-ubuntu24-stable.yaml
+        rv64-multilib-rocky9-stable.yaml
+        rv64-multilib-ubuntu24-stable.yaml
+        rv32-scr1-rocky9-stable.yaml
+        rv32-scr1-ubuntu24-stable.yaml
+        rv32-ibex-rocky9-stable.yaml
+        rv32-ibex-ubuntu24-stable.yaml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          submodules: false
+
+      - name: Find latest upstream release
+        id: release
+        run: |
+          tag="$(gh api repos/riscv-collab/riscv-gnu-toolchain/releases/latest --jq .tag_name)"
+          test -n "$tag"
+          # Prefer the peeled commit of an annotated tag, fall back to the tag itself.
+          sha="$(git ls-remote "$UPSTREAM" "refs/tags/$tag^{}" | cut -f1)"
+          [ -n "$sha" ] || sha="$(git ls-remote "$UPSTREAM" "refs/tags/$tag" | cut -f1)"
+          echo "$sha" | grep -Eq '^[0-9a-f]{40}$'
+          echo "Latest release: $tag ($sha)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Bump submodule to the release
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          current="$(git ls-tree HEAD riscv-gnu-toolchain | awk '{print $3}')"
+          if [ "$current" = "$SHA" ]; then
+            echo "Submodule already at $TAG ($SHA)"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git update-index --add --cacheinfo "160000,$SHA,riscv-gnu-toolchain"
+          git commit -m "Bump riscv-gnu-toolchain to $TAG" \
+                     -m "Upstream commit $SHA (was ${current:-none})."
+          git pull --rebase origin "$BRANCH"
+          git push origin "HEAD:$BRANCH"
+
+      - name: Start stable builds
+        run: |
+          for wf in $STABLE_WORKFLOWS; do
+            echo "Starting $wf on $BRANCH"
+            gh workflow run "$wf" --ref "$BRANCH"
+          done

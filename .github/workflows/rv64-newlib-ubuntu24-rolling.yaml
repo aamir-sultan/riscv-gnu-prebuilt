@@ -1,0 +1,29 @@
+name: RV64 Newlib (rv64gc) · Ubuntu 24.04 · rolling
+
+# Builds the current tip of riscv-gnu-toolchain master on Ubuntu 24.04, every ~10 days.
+
+on:
+  schedule:
+    - cron: "0 6 5,15,25 * *"    # 06:00 UTC on the 5th, 15th and 25th
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  rv64-newlib-ubuntu24:
+    permissions:
+      contents: write    # publish the GitHub Release
+    uses: ./.github/workflows/_build-riscv-gnu-ubuntu24.yaml
+    with:
+      name: rv64-newlib
+      channel: rolling
+      configure_flags: --with-arch=rv64gc_zicsr_zifencei --with-abi=lp64d
+      triple: riscv64-unknown-elf
+      smoke_march: rv64gc_zicsr_zifencei
+      smoke_mabi: lp64d
+      retention_days: 20    # covers two rolling cycles

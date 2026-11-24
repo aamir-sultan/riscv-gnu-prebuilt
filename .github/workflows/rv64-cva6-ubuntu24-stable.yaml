@@ -1,0 +1,23 @@
+name: CVA6 Toolchain (GCC 13.1.0, -mtune=cva6) · Ubuntu 24.04 · stable
+
+# Builds the pinned CVA6 toolchain on Ubuntu 24.04, monthly. Pins live in _build-cva6-ubuntu24.yaml.
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"    # 03:00 UTC on the 1st of every month
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  rv64-cva6-ubuntu24:
+    permissions:
+      contents: write    # publish the GitHub Release
+    uses: ./.github/workflows/_build-cva6-ubuntu24.yaml
+    with:
+      retention_days: 40

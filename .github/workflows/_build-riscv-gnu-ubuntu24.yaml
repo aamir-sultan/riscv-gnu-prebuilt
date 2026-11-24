@@ -1,0 +1,301 @@
+name: Build riscv-gnu-toolchain on Ubuntu 24.04 (reusable)
+
+# Called by the <config>-ubuntu24-<channel>.yaml workflows. Builds in an
+# ubuntu:24.04 container (glibc 2.39).
+#   stable:  builds the commit recorded by this repository's riscv-gnu-toolchain
+#            submodule (moved to each new upstream release by
+#            bump-riscv-gnu-toolchain.yaml).
+#   rolling: builds the current tip of upstream master.
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Artifact base name, e.g. rv64-newlib
+        type: string
+        required: true
+      channel:
+        description: stable or rolling
+        type: string
+        required: true
+      configure_flags:
+        description: Extra flags for ./configure
+        type: string
+        required: true
+      triple:
+        description: Installed tool prefix, e.g. riscv64-unknown-elf
+        type: string
+        required: true
+      smoke_march:
+        description: -march for the smoke test (ignored for multilib)
+        type: string
+        default: ""
+      smoke_mabi:
+        description: -mabi for the smoke test (ignored for multilib)
+        type: string
+        default: ""
+      multilib:
+        description: Run the RV32 + RV64 multilib smoke test
+        type: boolean
+        default: false
+      rv64_aliases:
+        description: Add riscv64-unknown-elf-* symlinks to riscv32 tools
+        type: boolean
+        default: false
+      retention_days:
+        type: number
+        default: 40
+
+env:
+  UPSTREAM: https://github.com/riscv-collab/riscv-gnu-toolchain
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.ref.outputs.sha }}
+      label: ${{ steps.ref.outputs.label }}
+      package: ${{ steps.ref.outputs.package }}
+      release_tag: ${{ steps.ref.outputs.release_tag }}
+      release_title: ${{ steps.ref.outputs.release_title }}
+      release_notes: ${{ steps.ref.outputs.release_notes }}
+      prerelease: ${{ steps.ref.outputs.prerelease }}
+    steps:
+      - name: Check out this repository (stable reads the submodule)
+        if: inputs.channel == 'stable'
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Resolve upstream commit
+        id: ref
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          NAME: ${{ inputs.name }}
+        run: |
+          case "$CHANNEL" in
+            stable)
+              sha="$(git ls-tree HEAD riscv-gnu-toolchain | awk '$2 == "commit" {print $3}')"
+              [ -n "$sha" ] || { echo "::error::No riscv-gnu-toolchain submodule commit recorded on $(git rev-parse --short HEAD); run the 'Bump riscv-gnu-toolchain' workflow first"; exit 1; }
+              # Label with the release tag that points at this commit, if any.
+              tag="$(git ls-remote --tags "$UPSTREAM" \
+                     | awk -v s="$sha" '$1 == s {sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2}' \
+                     | sort -u | tail -n 1)"
+              label="${tag:-${sha:0:7}}"
+              release_tag="$label"
+              release_title="riscv-gnu-toolchain $label"
+              release_notes="Prebuilt riscv-gnu-toolchain $label (upstream commit $sha) for x86_64 Linux. Assets are named <config>-<os>.tar.gz; each has a .sha256 checksum and a <config>-<os>-build-info.txt with the exact sources and configure flags."
+              prerelease=false
+              ;;
+            rolling)
+              sha="$(git ls-remote "$UPSTREAM" refs/heads/master | cut -f1)"
+              label="$(date -u +%Y%m%d)-${sha:0:7}"
+              release_tag=rolling
+              release_title="Rolling: riscv-gnu-toolchain master"
+              release_notes="Prebuilt riscv-gnu-toolchain from the tip of upstream master, rebuilt about every 10 days. Assets are replaced in place; see each <config>-<os>-build-info.txt for its upstream commit. Use the latest stable release unless you need unreleased fixes."
+              prerelease=true
+              ;;
+            *)
+              echo "::error::Unknown channel '$CHANNEL' (expected stable or rolling)"
+              exit 1
+              ;;
+          esac
+          echo "$sha" | grep -Eq '^[0-9a-f]{40}$' || { echo "::error::Could not resolve a commit"; exit 1; }
+          echo "Building $CHANNEL on ubuntu24: $label ($sha)"
+          {
+            echo "sha=$sha"
+            echo "label=$label"
+            echo "package=$NAME-ubuntu24-$CHANNEL-$label"
+            echo "release_tag=$release_tag"
+            echo "release_title=$release_title"
+            echo "release_notes=$release_notes"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    # Containers run steps with sh by default, and Ubuntu's sh is dash, which
+    # lacks pipefail, ${var:0:7} and source. bash runs as "bash -eo pipefail".
+    defaults:
+      run:
+        shell: bash
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 350
+    container:
+      image: ubuntu:24.04
+      volumes:
+        - /usr:/host/usr
+        - /opt:/host/opt
+    env:
+      TOOLCHAIN_REF: ${{ needs.resolve.outputs.sha }}
+      VERSION_LABEL: ${{ needs.resolve.outputs.label }}
+      CHANNEL: ${{ inputs.channel }}
+      CONFIGURE_FLAGS: ${{ inputs.configure_flags }}
+      TRIPLE: ${{ inputs.triple }}
+      SMOKE_MARCH: ${{ inputs.smoke_march }}
+      SMOKE_MABI: ${{ inputs.smoke_mabi }}
+      MULTILIB: ${{ inputs.multilib }}
+      PACKAGE: ${{ needs.resolve.outputs.package }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+
+      - name: Free up disk space
+        run: |
+          rm -rf /host/usr/local/lib/android /host/usr/share/dotnet /host/opt/ghc \
+                 /host/usr/local/share/boost /host/usr/local/graalvm \
+                 /host/usr/local/share/chromium /host/opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            autoconf automake autotools-dev curl python3 python3-pip \
+            libmpc-dev libmpfr-dev libgmp-dev libusb-1.0-0-dev \
+            gawk build-essential bison flex texinfo gperf libtool \
+            patchutils bc zlib1g-dev libexpat1-dev libncurses-dev \
+            device-tree-compiler git ca-certificates diffutils file findutils patch \
+            tar gzip xz-utils bzip2 util-linux procps rsync
+
+      - name: Clone riscv-gnu-toolchain
+        run: |
+          git -c init.defaultBranch=main init -q src
+          cd src
+          git remote add origin "$UPSTREAM"
+          git fetch --depth 1 origin "$TOOLCHAIN_REF"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$TOOLCHAIN_REF"
+          git log -1 --format='%H %s'
+
+      - name: Fetch required submodules (binutils, gcc, gdb, newlib)
+        working-directory: src
+        run: |
+          # A newlib build needs only these four. The Makefile clones any other
+          # submodule it needs on demand, so qemu, llvm, glibc, dejagnu etc. are
+          # never fetched. Rate-limited GNU hosts (HTTP 429 from gcc.gnu.org and
+          # sourceware.org) are swapped for their GitHub mirrors.
+          modules="binutils gcc gdb newlib"
+          for m in $modules; do
+            git submodule init "$m"
+            url="$(git config "submodule.$m.url")"
+            case "$url" in
+              *gcc.gnu.org/git/gcc.git)             url=https://github.com/gcc-mirror/gcc.git ;;
+              *sourceware.org/git/binutils-gdb.git) url=https://github.com/gnutools/binutils-gdb.git ;;
+              *sourceware.org/git/newlib-cygwin.git) url=https://github.com/cygwin/cygwin.git ;;
+            esac
+            git config "submodule.$m.url" "$url"
+            echo "$m <- $url @ $(git ls-tree HEAD "$m" | awk '{print $3}')"
+          done
+          for attempt in 1 2 3 4; do
+            # shellcheck disable=SC2086
+            git submodule update --depth 1 --jobs 4 $modules && exit 0
+            echo "::warning::Submodule fetch attempt $attempt failed"
+            sleep $((attempt * 60))
+          done
+          echo "::error::Could not fetch submodules after 4 attempts"
+          exit 1
+
+      - name: Configure
+        working-directory: src
+        run: |
+          # Word splitting of CONFIGURE_FLAGS is intended.
+          # shellcheck disable=SC2086
+          ./configure --prefix="$HOME/riscv" $CONFIGURE_FLAGS
+
+      - name: Build
+        working-directory: src
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" 2>&1 | tee build.log    # drop to -j2 if the runner OOMs
+
+      - name: Diagnose (only if the build failed)
+        if: failure()
+        working-directory: src
+        run: |
+          echo "### Disk state:"
+          df -h / || true
+          df -i / || true
+          echo "### OOM killer activity:"
+          dmesg 2>/dev/null | grep -i "out of memory" | tail -n 10 || true
+          echo "### Error lines from build.log:"
+          grep -nE '\*\*\*|No space|Killed|memory|rror' build.log | tail -n 40 || true
+
+      - name: Smoke test
+        run: |
+          cc="$HOME/riscv/bin/${TRIPLE}-gcc"
+          readelf="$HOME/riscv/bin/${TRIPLE}-readelf"
+          "$cc" --version
+          if [ "$MULTILIB" = "true" ]; then
+            "$cc" --print-multi-lib
+            printf 'int main(void){return 0;}\n' > smoke.c
+            "$cc" -march=rv32imac -mabi=ilp32 smoke.c -o smoke-rv32.elf
+            "$cc" -march=rv64gc -mabi=lp64d smoke.c -o smoke-rv64.elf
+            "$readelf" -h smoke-rv32.elf | grep -Eq 'Class:[[:space:]]+ELF32'
+            "$readelf" -h smoke-rv64.elf | grep -Eq 'Class:[[:space:]]+ELF64'
+          else
+            # Verifies zicsr + zifencei assemble and link.
+            printf 'int main(void){ asm volatile("csrr x0, misa"); asm volatile("fence.i"); return 0; }\n' > smoke.c
+            "$cc" -march="$SMOKE_MARCH" -mabi="$SMOKE_MABI" smoke.c -o smoke.elf
+            ls -l smoke.elf
+          fi
+
+      - name: Add riscv64-unknown-elf-* aliases (compatibility with existing consumers)
+        if: inputs.rv64_aliases
+        run: |
+          cd "$HOME/riscv/bin"
+          for t in riscv32-unknown-elf-*; do
+            ln -svf "$t" "riscv64-unknown-elf-${t#riscv32-unknown-elf-}"
+          done
+
+      - name: Record build inputs
+        working-directory: src
+        run: |
+          {
+            printf 'workflow=%s\n' "$GITHUB_WORKFLOW"
+            printf 'repository_commit=%s\n' "$GITHUB_SHA"
+            printf 'channel=%s\n' "$CHANNEL"
+            printf 'build_os=%s\n' "$(. /etc/os-release && echo "$PRETTY_NAME")"
+            printf 'build_glibc=%s\n' "$(ldd --version | head -n 1)"
+            printf 'version=%s\n' "$VERSION_LABEL"
+            printf 'toolchain_commit=%s\n' "$(git rev-parse HEAD)"
+            git submodule status
+            ./config.status --config
+            "$HOME/riscv/bin/${TRIPLE}-gcc" --version
+          } > "$HOME/riscv/build-info.txt"
+
+      - name: Package
+        run: tar -czf "$PACKAGE.tar.gz" -C "$HOME/riscv" .
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}-${{ github.run_number }}
+          path: ${{ env.PACKAGE }}.tar.gz
+          retention-days: ${{ inputs.retention_days }}
+          compression-level: 0
+          if-no-files-found: error
+
+  release:
+    # Publishes the archive as the GitHub Release asset <config>-ubuntu24.tar.gz.
+    # Only runs on the default branch, so test runs from other branches never
+    # touch the releases.
+    #   stable:  release tagged with the upstream version (e.g. 2026.10.29)
+    #   rolling: single "rolling" prerelease whose assets are replaced each run
+    needs: [resolve, build]
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: write
+    uses: ./.github/workflows/_release.yaml
+    with:
+      artifact: ${{ needs.resolve.outputs.package }}-${{ github.run_number }}
+      file: ${{ needs.resolve.outputs.package }}.tar.gz
+      asset: ${{ inputs.name }}-ubuntu24
+      tag: ${{ needs.resolve.outputs.release_tag }}
+      title: ${{ needs.resolve.outputs.release_title }}
+      notes: ${{ needs.resolve.outputs.release_notes }}
+      prerelease: ${{ needs.resolve.outputs.prerelease == 'true' }}
+      latest: ${{ inputs.channel == 'stable' }}

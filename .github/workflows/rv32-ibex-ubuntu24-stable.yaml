@@ -1,0 +1,29 @@
+name: Ibex Newlib (rv32imc) · Ubuntu 24.04 · stable
+
+# Builds the riscv-gnu-toolchain release recorded by the submodule on Ubuntu 24.04.
+# Started monthly by bump-riscv-gnu-toolchain.yaml after it bumps the submodule.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  rv32-ibex-ubuntu24:
+    permissions:
+      contents: write    # publish the GitHub Release
+    uses: ./.github/workflows/_build-riscv-gnu-ubuntu24.yaml
+    with:
+      name: rv32-ibex
+      channel: stable
+      configure_flags: --with-arch=rv32imc_zicsr_zifencei --with-abi=ilp32
+      triple: riscv32-unknown-elf
+      smoke_march: rv32imc_zicsr_zifencei
+      smoke_mabi: ilp32
+      rv64_aliases: true
+      retention_days: 40

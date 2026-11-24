@@ -1,0 +1,183 @@
+name: Build CVA6 toolchain on Rocky Linux 9 (reusable)
+
+# Called by rv64-cva6-rocky9-stable.yaml. Builds GCC 13.1.0 with the CVA6
+# -mtune=cva6 patch from pinned revisions, using the CVA6 toolchain builder, in a
+# rockylinux/rockylinux:9.9 container, and publishes it to the
+# cva6-<commit>-gcc-<version> release.
+#
+# To upgrade, update every *_REF / *_VERSION / TOOLCHAIN_CONFIG value below
+# together, in both _build-cva6-rocky9.yaml and _build-cva6-ubuntu24.yaml.
+
+on:
+  workflow_call:
+    inputs:
+      retention_days:
+        type: number
+        default: 40
+
+env:
+  CVA6_REF: 81245a47fad8fe1a5d562d953ef2662e099def76
+  TOOLCHAIN_CONFIG: gcc-13.1.0-baremetal
+  GCC_VERSION: 13.1.0
+  GCC_REF: cc035c5d8672f87dc8c2756d9f8367903aa72d93
+  BINUTILS_REF: 32778522c7d8777803c88684b8e428ee729f0b22
+  NEWLIB_REF: 9e09d6ed83cce4777a5950412647ccc603040409
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    permissions: {}
+    outputs:
+      package: ${{ steps.meta.outputs.package }}
+      tag: ${{ steps.meta.outputs.tag }}
+      cva6_ref: ${{ steps.meta.outputs.cva6_ref }}
+      gcc_version: ${{ steps.meta.outputs.gcc_version }}
+    steps:
+      - name: Release and package names
+        id: meta
+        run: |
+          tag="cva6-${CVA6_REF:0:7}-gcc-$GCC_VERSION"
+          {
+            echo "tag=$tag"
+            echo "package=rv64-cva6-rocky9-$tag"
+            echo "cva6_ref=$CVA6_REF"
+            echo "gcc_version=$GCC_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    # Containers run steps with sh by default, and Ubuntu's sh is dash, which
+    # lacks pipefail, ${var:0:7} and source. bash runs as "bash -eo pipefail".
+    defaults:
+      run:
+        shell: bash
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 350
+    container:
+      image: rockylinux/rockylinux:9.9
+      volumes:
+        - /usr:/host/usr
+        - /opt:/host/opt
+    env:
+      PACKAGE: ${{ needs.resolve.outputs.package }}
+    steps:
+
+      - name: Free up disk space
+        run: |
+          rm -rf /host/usr/local/lib/android /host/usr/share/dotnet /host/opt/ghc \
+                 /host/usr/local/share/boost /host/usr/local/graalvm \
+                 /host/usr/local/share/chromium /host/opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          dnf install -y dnf-plugins-core epel-release
+          dnf config-manager --set-enabled crb
+          dnf install -y --allowerasing --setopt=install_weak_deps=False \
+            autoconf automake curl git \
+            libmpc-devel mpfr-devel gmp-devel gawk \
+            gcc gcc-c++ make bison flex texinfo gperf libtool \
+            bc zlib-devel diffutils file findutils which patch \
+            tar gzip xz bzip2 util-linux procps-ng
+
+      - name: Use GitHub mirrors for sourceware.org
+        run: |
+          # sourceware.org rate-limits CI clones (HTTP 429). The mirrors carry the
+          # same tags; the fetch step below verifies the exact commits.
+          git config --global url."https://github.com/gnutools/binutils-gdb.git".insteadOf https://sourceware.org/git/binutils-gdb.git
+          git config --global url."https://github.com/cygwin/cygwin.git".insteadOf https://sourceware.org/git/newlib-cygwin.git
+          git config --global init.defaultBranch main
+
+      - name: Clone CVA6
+        run: |
+          git init -q cva6
+          cd cva6
+          git remote add origin https://github.com/openhwfoundation/cva6
+          git fetch --depth 1 origin "$CVA6_REF"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$CVA6_REF"
+
+      - name: Fetch toolchain sources
+        working-directory: cva6/util/toolchain-builder
+        run: |
+          for attempt in 1 2 3 4; do
+            bash get-toolchain.sh "$TOOLCHAIN_CONFIG" && break
+            [ "$attempt" = 4 ] && { echo "::error::Could not fetch sources after 4 attempts"; exit 1; }
+            echo "::warning::Source fetch attempt $attempt failed"
+            sleep $((attempt * 60))
+          done
+          # Fail if a release tag has moved or the fetch script failed silently.
+          test "$(git -C src/gcc rev-parse HEAD)" = "$GCC_REF"
+          test "$(git -C src/binutils-gdb rev-parse HEAD)" = "$BINUTILS_REF"
+          test "$(git -C src/newlib rev-parse HEAD)" = "$NEWLIB_REF"
+
+      - name: Apply CVA6 tuning patch (adds -mtune=cva6)
+        working-directory: cva6/util/toolchain-builder/src/gcc
+        run: git apply ../../gcc-cva6-tune.patch
+
+      - name: Build toolchain
+        working-directory: cva6/util/toolchain-builder
+        run: NUM_JOBS="$(nproc)" bash build-toolchain.sh "$TOOLCHAIN_CONFIG" "$HOME/riscv"
+
+      - name: Smoke test (verifies the -mtune=cva6 patch took)
+        run: |
+          "$HOME/riscv/bin/riscv-none-elf-gcc" --version
+          test "$("$HOME/riscv/bin/riscv-none-elf-gcc" -dumpfullversion)" = "$GCC_VERSION"
+          printf 'int main(void){return 0;}\n' > /tmp/t.c
+          "$HOME/riscv/bin/riscv-none-elf-gcc" -mtune=cva6 -S /tmp/t.c -o /tmp/t.s
+
+      - name: Record build inputs
+        working-directory: cva6/util/toolchain-builder
+        run: |
+          export ROOT_DIR="$PWD"
+          export INSTALL_DIR="$HOME/riscv"
+          source config/global.sh
+          {
+            printf 'workflow=%s\n' "$GITHUB_WORKFLOW"
+            printf 'repository_commit=%s\n' "$GITHUB_SHA"
+            printf 'build_os=%s\n' "$(. /etc/os-release && echo "$PRETTY_NAME")"
+            printf 'build_glibc=%s\n' "$(ldd --version | head -n 1)"
+            printf 'cva6_commit=%s\n' "$(git rev-parse HEAD)"
+            printf 'configuration=%s\n' "$TOOLCHAIN_CONFIG"
+            for component in gcc binutils-gdb newlib; do
+              printf '%s_commit=%s\n' "$component" "$(git -C "src/$component" rev-parse HEAD)"
+            done
+            sha256sum gcc-cva6-tune.patch
+            BINUTILS_CONFIGURE_OPTS riscv-none-elf
+            GCC_CONFIGURE_OPTS
+            NEWLIB_CONFIGURE_OPTS riscv-none-elf
+            "$INSTALL_DIR/bin/riscv-none-elf-gcc" --version
+          } > "$INSTALL_DIR/build-info.txt"
+
+      - name: Package
+        run: tar -czf "$PACKAGE.tar.gz" -C "$HOME/riscv" .
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}-${{ github.run_number }}
+          path: ${{ env.PACKAGE }}.tar.gz
+          retention-days: ${{ inputs.retention_days }}
+          compression-level: 0
+          if-no-files-found: error
+
+  release:
+    # Publishes rv64-cva6-rocky9.tar.gz to the cva6-<commit>-gcc-<version> release.
+    # Never marked "latest", so releases/latest stays on the riscv-gnu-toolchain build.
+    needs: [resolve, build]
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: write
+    uses: ./.github/workflows/_release.yaml
+    with:
+      artifact: ${{ needs.resolve.outputs.package }}-${{ github.run_number }}
+      file: ${{ needs.resolve.outputs.package }}.tar.gz
+      asset: rv64-cva6-rocky9
+      tag: ${{ needs.resolve.outputs.tag }}
+      title: >-
+        CVA6 toolchain (GCC ${{ needs.resolve.outputs.gcc_version }}, -mtune=cva6)
+      latest: false
+      notes: >-
+        Prebuilt GCC ${{ needs.resolve.outputs.gcc_version }} bare-metal toolchain (`riscv-none-elf-*`) with the `-mtune=cva6` patch, built with the [CVA6 toolchain builder](https://github.com/openhwfoundation/cva6/tree/${{ needs.resolve.outputs.cva6_ref }}/util/toolchain-builder) at CVA6 commit `${{ needs.resolve.outputs.cva6_ref }}`. Rebuilt monthly from the same pinned sources.<br><br>Assets are named `rv64-cva6-<os>.tar.gz`, each with a `.sha256` checksum and a `rv64-cva6-<os>-build-info.txt` listing the exact sources and configure flags.

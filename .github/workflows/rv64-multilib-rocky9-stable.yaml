@@ -1,0 +1,27 @@
+name: RISC-V Newlib (multilib) · Rocky 9 · stable
+
+# Builds the riscv-gnu-toolchain release recorded by the submodule on Rocky 9.
+# Started monthly by bump-riscv-gnu-toolchain.yaml after it bumps the submodule.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  rv64-multilib-rocky9:
+    permissions:
+      contents: write    # publish the GitHub Release
+    uses: ./.github/workflows/_build-riscv-gnu-rocky9.yaml
+    with:
+      name: rv64-multilib
+      channel: stable
+      configure_flags: --enable-multilib
+      triple: riscv64-unknown-elf
+      multilib: true
+      retention_days: 40

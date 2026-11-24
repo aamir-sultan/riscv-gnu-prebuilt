@@ -1,0 +1,30 @@
+name: Ibex Newlib (rv32imc) · Rocky 9 · rolling
+
+# Builds the current tip of riscv-gnu-toolchain master on Rocky 9, every ~10 days.
+
+on:
+  schedule:
+    - cron: "0 6 5,15,25 * *"    # 06:00 UTC on the 5th, 15th and 25th
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  rv32-ibex-rocky9:
+    permissions:
+      contents: write    # publish the GitHub Release
+    uses: ./.github/workflows/_build-riscv-gnu-rocky9.yaml
+    with:
+      name: rv32-ibex
+      channel: rolling
+      configure_flags: --with-arch=rv32imc_zicsr_zifencei --with-abi=ilp32
+      triple: riscv32-unknown-elf
+      smoke_march: rv32imc_zicsr_zifencei
+      smoke_mabi: ilp32
+      rv64_aliases: true
+      retention_days: 20    # covers two rolling cycles
